@@ -1,0 +1,33 @@
+# Ortak saldırı grupları: her datasetin ham etiketleri bu gruplara eşlenir,
+# böylece farklı datasetler aynı ölçekte karşılaştırılabilir.
+#
+# Yeni bir dataset buraya uymayan bir saldırı türü getirirse yeni grup ekleyin.
+# Kurallar:
+#   - id = -1 sadece normal trafik içindir.
+#   - Saldırı grupları 0'dan başlar; Stage 2 modelinin sınıf numarası id'dir.
+#   - Mevcut id'leri değiştirmeyin, eğitilmiş modellerin sonuçları bozulur.
+#     Yeni gruba sıradaki boş id'yi verin.
+
+[groups.normal]
+id = -1
+title = "Normal"
+
+[groups.brute_force]
+id = 0
+title = "Brute Force (FTP/SSH)"
+
+[groups.dos]
+id = 1
+title = "DoS / DDoS"
+
+[groups.web]
+id = 2
+title = "Web Attack"
+
+[groups.recon]
+id = 3
+title = "Port Scan / Keşif"
+
+[groups.bot_infiltration]
+id = 4
+title = "Bot / Infiltration"

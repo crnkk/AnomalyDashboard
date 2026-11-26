@@ -4,11 +4,15 @@ import numpy as np
 import os
 import glob
 import time
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import registry  # noqa: E402
 
 # ── Sayfa ayarları ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="CIC-IDS2017 Anomali Tespit",
+    page_title="Anomali Tespit",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -65,78 +69,31 @@ st.markdown("""
 # ══════════════════════════════════════════════════════
 # SABİTLER
 # ══════════════════════════════════════════════════════
-BASE_DIR   = Path(__file__).resolve().parent
-RAW_DIR    = BASE_DIR / 'data' / 'raw' / 'cicids2017'      # scripts/download_data.py
-SAMPLE_DIR = BASE_DIR / 'data' / 'sample' / 'cicids2017'   # repoda gelen küçük örnek
-
-def default_data_dir():
-    """ANOMALI_DATA_DIR > tam veri (indirildiyse) > örnek veri."""
-    env_dir = os.environ.get('ANOMALI_DATA_DIR')
-    if env_dir:
-        return env_dir
-    if any(RAW_DIR.glob('*.csv')):
-        return str(RAW_DIR)
-    return str(SAMPLE_DIR)
-
-FILE_MAP = {
-    'Monday-WorkingHours.pcap_ISCX.csv':                         'monday',
-    'Tuesday-WorkingHours.pcap_ISCX.csv':                        'tuesday',
-    'Wednesday-workingHours.pcap_ISCX.csv':                      'wednesday',
-    'Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv':    'thursday_am',
-    'Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv':'thursday_pm',
-    'Friday-WorkingHours-Morning.pcap_ISCX.csv':                 'friday_am',
-    'Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv':      'friday_pm_port',
-    'Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv':          'friday_pm_ddos',
-}
-
-DAY_LABELS = {
-    'monday':        'Pazartesi (Referans normal)',
-    'tuesday':       'Salı — Brute Force',
-    'wednesday':     'Çarşamba — DoS/DDoS',
-    'thursday_am':   'Perşembe sabah — Web Attack',
-    'thursday_pm':   'Perşembe öğleden sonra — Infiltration',
-    'friday_am':     'Cuma sabah — Bot',
-    'friday_pm_port':'Cuma öğleden sonra — PortScan',
-    'friday_pm_ddos':'Cuma öğleden sonra — DDoS',
-}
-
-ATTACK_GROUPS = {
-    'BENIGN':                       -1,
-    'FTP-Patator':                   0,
-    'SSH-Patator':                   0,
-    'DoS Hulk':                      1,
-    'DoS GoldenEye':                 1,
-    'DoS slowloris':                 1,
-    'DoS Slowhttptest':              1,
-    'Heartbleed':                    1,
-    'DDoS':                          1,
-    'Web Attack - Brute Force':      2,
-    'Web Attack - XSS':              2,
-    'Web Attack - Sql Injection':    2,
-    'PortScan':                      3,
-    'Bot':                           4,
-    'Infiltration':                  4,
-}
-
-GROUP_NAMES = {
-    0: 'Brute Force (FTP/SSH)',
-    1: 'DoS / DDoS',
-    2: 'Web Attack',
-    3: 'Port Scan',
-    4: 'Bot / Infiltration',
-}
-
 DROP_COLS = {'Label', 'binary_label', 'multi_label', 'day'}
 
 # ══════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════
 with st.sidebar:
-    st.title("🛡️ CIC-IDS2017")
-    st.caption("Anomali Tespit Pipeline")
+    st.title("🛡️ Anomali Tespit")
+    st.caption("Veri hazırlama pipeline'ı")
     st.divider()
 
-    DATA_DIR = pd.read_csv('config.csv').columns[0]
+    DATASET = st.selectbox(
+        "Dataset",
+        registry.list_datasets(),
+        help="datasets/ klasöründeki her .toml dosyası bir datasettir",
+    )
+    CFG = registry.load_dataset(DATASET)
+
+    DATA_DIR = st.text_input(
+        "Veri dizini",
+        value=str(registry.resolve_data_dir(DATASET)),
+        help="Kalıcı olarak değiştirmek için config.local.toml → [data_dirs]",
+    )
+    if Path(DATA_DIR).resolve() == registry.sample_dir(DATASET).resolve():
+        st.warning("Örnek veri kullanılıyor. Tam veri için: "
+                   f"`python scripts/download_data.py {DATASET}`")
 
     st.divider()
     st.markdown("### Pipeline aşamaları")
@@ -150,22 +107,27 @@ with st.sidebar:
     st.divider()
     st.caption("Tüm aşamalar önbelleğe alınır. Dizin değişirse yeniden hesaplanır.")
 
+# ── Seçilen datasetin config'inden türetilen tablolar ──────────
+FILE_MAP      = {fname: meta['segment'] for fname, meta in CFG['files'].items()}
+DAY_LABELS    = {meta['segment']: meta.get('title', meta['segment']) for meta in CFG['files'].values()}
+ATTACK_GROUPS = registry.label_group_ids(CFG)   # ham etiket → grup id (normal = -1)
+GROUP_NAMES   = registry.group_titles()         # grup id → başlık
+LABEL_COL     = CFG['label_column']
+NORMAL_LABELS = [lbl for lbl, gid in ATTACK_GROUPS.items() if gid == -1]
+
+# Dataset ya da dizin değişince önceki aşamaların sonuçlarını unut
+SOURCE_KEY = f"{DATASET}:{Path(DATA_DIR).resolve()}"
+if st.session_state.get('source_key') != SOURCE_KEY:
+    for key in ['data', 'load_log', 'missing', 'clean_data', 'clean_stats',
+                'labeled_data', 'benign_unmatched']:
+        st.session_state.pop(key, None)
+    st.session_state['source_key'] = SOURCE_KEY
+
 # ══════════════════════════════════════════════════════
 # YARDIMCI FONKSİYONLAR
 # ══════════════════════════════════════════════════════
-def normalize_labels(labels):
-    """Web Attack etiketlerindeki tire dağıtıma göre '\\x96' (cp1252) ya da
-    '\\ufffd' (�) olarak bozuk gelir; hepsini '-' yapar."""
-    return (labels.astype(str)
-                  .str.replace('\ufffd', '-', regex=False)
-                  .str.replace('\x96', '-', regex=False)
-                  .str.strip())
-
 def safe_map(label):
-    for key, val in ATTACK_GROUPS.items():
-        if key.lower() in str(label).lower():
-            return val
-    return -1
+    return ATTACK_GROUPS.get(label, -1)
 
 def color_ratio(ratio):
     if ratio < 1:
@@ -178,7 +140,7 @@ def color_ratio(ratio):
         return "🟢"
 
 @st.cache_data(show_spinner=False)
-def load_data(data_dir):
+def load_data(dataset, data_dir):
     frames = []
     load_log = []
     missing = []
@@ -190,7 +152,9 @@ def load_data(data_dir):
             continue
         df = pd.read_csv(path, encoding='utf-8', low_memory=False)
         df.columns = df.columns.str.strip()
-        df['Label'] = normalize_labels(df['Label'])
+        if LABEL_COL != 'Label':
+            df = df.rename(columns={LABEL_COL: 'Label'})
+        df['Label'] = registry.normalize_labels(df['Label'], CFG)
         df['day'] = day_tag
         classes = df['Label'].unique().tolist()
         load_log.append({
@@ -225,21 +189,21 @@ def clean_data(data_hash, _data):
 @st.cache_data(show_spinner=False)
 def label_data(data_hash, _data):
     df = _data.copy()
-    df['binary_label'] = (df['Label'] != 'BENIGN').astype(int)
+    df['binary_label'] = (~df['Label'].isin(NORMAL_LABELS)).astype(int)
     df['multi_label']  = df['Label'].apply(safe_map)
 
-    unmatched = df[df['multi_label'] == -1]['Label'].unique()
-    benign_unmatched = [l for l in unmatched if l != 'BENIGN']
+    # Config'te [labels] altında olmayan etiketler (yeni dataset eklerken buradan görülür)
+    benign_unmatched = sorted(set(df['Label'].unique()) - set(ATTACK_GROUPS))
 
     return df, benign_unmatched
 
 # ══════════════════════════════════════════════════════
 # BAŞLIK
 # ══════════════════════════════════════════════════════
-st.markdown("""
+st.markdown(f"""
 <div class="stage-header">
-    <h1 style="margin:0;font-size:1.8rem">🛡️ CIC-IDS2017 Anomali Tespit Pipeline</h1>
-    <p style="margin:4px 0 0;opacity:0.85">Paralel + Seri Neural Network · 5 Saldırı Grubu · İnanç Filtresi</p>
+    <h1 style="margin:0;font-size:1.8rem">🛡️ {CFG["title"]} Anomali Tespit Pipeline</h1>
+    <p style="margin:4px 0 0;opacity:0.85">Paralel + Seri Neural Network · {len(GROUP_NAMES)} Saldırı Grubu · İnanç Filtresi</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -269,7 +233,7 @@ with tab1:
         if 'data' not in st.session_state or load_btn:
             with st.spinner("CSV dosyaları okunuyor..."):
                 progress = st.progress(0, text="Dosyalar taranıyor...")
-                data, load_log, missing = load_data(DATA_DIR)
+                data, load_log, missing = load_data(DATASET, DATA_DIR)
                 for i in range(100):
                     time.sleep(0.005)
                     progress.progress(i + 1, text=f"Yükleniyor... %{i+1}")
@@ -312,7 +276,7 @@ with tab1:
         label_counts.columns = ['Etiket', 'Sayı']
         label_counts['Oran %'] = (label_counts['Sayı'] / len(data) * 100).round(3)
         label_counts['Tür'] = label_counts['Etiket'].apply(
-            lambda x: '🟢 Normal' if x == 'BENIGN' else '🔴 Saldırı'
+            lambda x: '🟢 Normal' if x in NORMAL_LABELS else '🔴 Saldırı'
         )
         st.dataframe(label_counts, use_container_width=True, hide_index=True)
 
@@ -320,8 +284,8 @@ with tab1:
         st.markdown("#### Gün bazlı kayıt dağılımı")
         day_counts = data.groupby('day').agg(
             Toplam=('Label', 'count'),
-            Normal=('Label', lambda x: (x == 'BENIGN').sum()),
-            Saldiri=('Label', lambda x: (x != 'BENIGN').sum())
+            Normal=('Label', lambda x: x.isin(NORMAL_LABELS).sum()),
+            Saldiri=('Label', lambda x: (~x.isin(NORMAL_LABELS)).sum())
         ).reset_index()
         day_counts['Gün'] = day_counts['day'].map(DAY_LABELS)
         st.bar_chart(day_counts.set_index('Gün')[['Normal', 'Saldiri']])
@@ -350,7 +314,7 @@ with tab2:
     if clean_btn or 'clean_data' in st.session_state:
         if 'clean_data' not in st.session_state or clean_btn:
             with st.spinner("Inf ve NaN değerler temizleniyor..."):
-                data_hash = str(len(raw_data))
+                data_hash = f"{SOURCE_KEY}:{len(raw_data)}"
                 clean, before, after, dropped, inf_counts, nan_counts = clean_data(data_hash, raw_data)
                 st.session_state['clean_data'] = clean
                 st.session_state['clean_stats'] = (before, after, dropped, inf_counts, nan_counts)
@@ -412,7 +376,7 @@ with tab3:
     if label_btn or 'labeled_data' in st.session_state:
         if 'labeled_data' not in st.session_state or label_btn:
             with st.spinner("Etiketler oluşturuluyor..."):
-                data_hash = str(len(clean))
+                data_hash = f"{SOURCE_KEY}:{len(clean)}"
                 labeled, benign_unmatched = label_data(data_hash, clean)
                 st.session_state['labeled_data']       = labeled
                 st.session_state['benign_unmatched']   = benign_unmatched
@@ -422,7 +386,7 @@ with tab3:
 
         # Eşleşmeyen etiketler
         if benign_unmatched:
-            st.markdown(f'<div class="danger-box">❌ <b>Eşleşmeyen etiketler</b> (BENIGN hariç): {", ".join(benign_unmatched)}</div>',
+            st.markdown(f'<div class="danger-box">❌ <b>Config\'te eşlemesi olmayan etiketler</b>: {", ".join(benign_unmatched)}<br>datasets/{DATASET}.toml → [labels] altına ekleyin.</div>',
                         unsafe_allow_html=True)
         else:
             st.markdown('<div class="success-box">✅ Tüm saldırı etiketleri gruplara başarıyla eşlendi.</div>',
@@ -531,7 +495,7 @@ with tab4:
     st.markdown("#### Multi-class (Stage 2) class weight")
 
     y_mul_only = labeled[labeled['binary_label'] == 1]['multi_label'].values
-    y_mul_only = y_mul_only[y_mul_only >= 0].astype(int)   # -1 (BENIGN) çıkar
+    y_mul_only = y_mul_only[y_mul_only >= 0].astype(int)   # -1 (normal) çıkar
     existing_classes = np.unique(y_mul_only)               # gerçekte var olan sınıflar
     w_mul = compute_class_weight('balanced', classes=existing_classes, y=y_mul_only)
     cw_mul = {int(cls): float(w) for cls, w in zip(existing_classes, w_mul)}

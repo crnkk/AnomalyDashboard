@@ -1,0 +1,6 @@
+# Bu dosyayı config.local.toml adıyla kopyalayın (git'e eklenmez).
+# Sadece kendi bilgisayarınıza özel ayarlar içindir.
+
+# Bir datasetin verisi varsayılan klasörde (data/raw/<dataset>/) değilse:
+[data_dirs]
+# cicids2017 = "/mnt/disk/veriler/cicids2017"

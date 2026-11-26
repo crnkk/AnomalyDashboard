@@ -6,6 +6,9 @@ Anomali_dataset/
 *.zip
 *.part
 
+# Makineye özel ayarlar (örnek: config.local.toml.example)
+config.local.toml
+
 # Sanal ortamlar
 anomali/
 .venv/

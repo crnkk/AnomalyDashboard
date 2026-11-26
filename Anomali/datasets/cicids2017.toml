@@ -1,0 +1,82 @@
+# CIC-IDS2017 — MachineLearningCVE CSV dosyaları
+# https://www.unb.ca/cic/datasets/ids-2017.html
+
+title = "CIC-IDS2017"
+label_column = "Label"
+
+[source]
+type = "kaggle"                       # "kaggle" (ref) ya da "url" (url = "https://...zip")
+ref = "chethuhn/network-intrusion-dataset"
+page = "https://www.kaggle.com/datasets/chethuhn/network-intrusion-dataset"
+
+# Etiketler eşlenmeden önce uygulanan düzeltmeler.
+# "Web Attack – XSS" içindeki tire dağıtıma göre \x96 (cp1252) ya da � (�) olarak bozuk gelir.
+[label_normalize]
+replace = [["�", "-"], ["\u0096", "-"]]
+
+# Dosya adı → segment (gün/oturum). bytes ve sha256 isteğe bağlıdır; verilirse indirme doğrulanır.
+[files."Monday-WorkingHours.pcap_ISCX.csv"]
+segment = "monday"
+title = "Pazartesi (Referans normal)"
+bytes = 176927918
+sha256 = "852c4beb34eda186f32561fa79df7a0747e92e1a6535b01270820dd9ffe17f34"
+
+[files."Tuesday-WorkingHours.pcap_ISCX.csv"]
+segment = "tuesday"
+title = "Salı — Brute Force"
+bytes = 135078995
+sha256 = "52b8692ae8c7d2ed04671fe2b98335693c0a92c7ab157d8c8b534d6523080851"
+
+[files."Wednesday-workingHours.pcap_ISCX.csv"]
+segment = "wednesday"
+title = "Çarşamba — DoS/DDoS"
+bytes = 225166395
+sha256 = "893c27dc968bf7a8adef1689f90be55ca4a4dc3088fb63d6ff247ac56856df2a"
+
+[files."Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv"]
+segment = "thursday_am"
+title = "Perşembe sabah — Web Attack"
+bytes = 52023263
+sha256 = "d67066211fb1689c78406f1506f4c44704ecb92088353d5c96d96d6474eb819d"
+
+[files."Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv"]
+segment = "thursday_pm"
+title = "Perşembe öğleden sonra — Infiltration"
+bytes = 83102436
+sha256 = "6bcda3857c2504676034e3ea57762d38393cc734cb377a726bd5cb153961b1b5"
+
+[files."Friday-WorkingHours-Morning.pcap_ISCX.csv"]
+segment = "friday_am"
+title = "Cuma sabah — Bot"
+bytes = 58316725
+sha256 = "53a41c24d570ea83b7ac55b2e94df94e7a8216aeb80a2af0246b6bc8bb543000"
+
+[files."Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv"]
+segment = "friday_pm_port"
+title = "Cuma öğleden sonra — PortScan"
+bytes = 76906168
+sha256 = "ca1824c51bfbb7b3c72290a11be04366ba8815878c6a1cc5c44cb1cee269e99b"
+
+[files."Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv"]
+segment = "friday_pm_ddos"
+title = "Cuma öğleden sonra — DDoS"
+bytes = 77123859
+sha256 = "6ff1580f5f81c0ae28a26f7631721018577f5f7c5e0feac28b795fcfe7b411ee"
+
+# Ham etiket (normalize edilmiş) → taxonomy.toml'daki grup
+[labels]
+"BENIGN"                     = "normal"
+"FTP-Patator"                = "brute_force"
+"SSH-Patator"                = "brute_force"
+"DoS Hulk"                   = "dos"
+"DoS GoldenEye"              = "dos"
+"DoS slowloris"              = "dos"
+"DoS Slowhttptest"           = "dos"
+"Heartbleed"                 = "dos"
+"DDoS"                       = "dos"
+"Web Attack - Brute Force"   = "web"
+"Web Attack - XSS"           = "web"
+"Web Attack - Sql Injection" = "web"
+"PortScan"                   = "recon"
+"Bot"                        = "bot_infiltration"
+"Infiltration"               = "bot_infiltration"

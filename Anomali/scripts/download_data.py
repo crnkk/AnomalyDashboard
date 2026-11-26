@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""CIC-IDS2017 (MachineLearningCVE CSV dosyaları) Kaggle'dan indirir ve doğrular.
+"""Bir datasetin ham dosyalarını datasets/<ad>.toml'daki kaynaktan indirir ve doğrular.
 
 Kullanım:
-    python scripts/download_data.py              # data/raw/cicids2017/ altına indirir
-    python scripts/download_data.py --dest DIR   # başka bir klasöre indirir
-    python scripts/download_data.py --force      # dosyalar varsa bile yeniden indirir
+    python scripts/download_data.py cicids2017            # data/raw/cicids2017/ altına
+    python scripts/download_data.py cicids2017 --dest DIR # başka bir klasöre
+    python scripts/download_data.py cicids2017 --force    # dosyalar varsa bile yeniden indir
 
-Sadece standart kütüphane kullanır. Dataset herkese açık olduğu için Kaggle hesabı
-gerekmez; anonim indirme reddedilirse KAGGLE_USERNAME / KAGGLE_KEY ortam
-değişkenleri ya da ~/.kaggle/kaggle.json kullanılır.
+Desteklenen kaynaklar ([source] type):
+    kaggle  ref = "sahip/dataset"   herkese açık Kaggle dataseti (hesap gerekmez; reddedilirse
+                                    KAGGLE_USERNAME/KAGGLE_KEY ya da ~/.kaggle/kaggle.json kullanılır)
+    url     url = "https://..."     zip arşivi ya da tek dosya
+
+Config'te bytes/sha256 verilmemiş dosyaların değerleri indirmeden sonra yazdırılır;
+config'e eklerseniz sonraki indirmeler bunlarla doğrulanır.
 """
 import argparse
 import base64
@@ -22,34 +26,10 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-KAGGLE_REF = "chethuhn/network-intrusion-dataset"
-KAGGLE_PAGE = "https://www.kaggle.com/datasets/" + KAGGLE_REF
-DOWNLOAD_URL = "https://www.kaggle.com/api/v1/datasets/download/" + KAGGLE_REF
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import registry  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DEST = ROOT / "data" / "raw" / "cicids2017"
-
-# dosya adı -> (bayt, sha256)
-EXPECTED = {
-    "Monday-WorkingHours.pcap_ISCX.csv":
-        (176927918, "852c4beb34eda186f32561fa79df7a0747e92e1a6535b01270820dd9ffe17f34"),
-    "Tuesday-WorkingHours.pcap_ISCX.csv":
-        (135078995, "52b8692ae8c7d2ed04671fe2b98335693c0a92c7ab157d8c8b534d6523080851"),
-    "Wednesday-workingHours.pcap_ISCX.csv":
-        (225166395, "893c27dc968bf7a8adef1689f90be55ca4a4dc3088fb63d6ff247ac56856df2a"),
-    "Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv":
-        (52023263, "d67066211fb1689c78406f1506f4c44704ecb92088353d5c96d96d6474eb819d"),
-    "Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv":
-        (83102436, "6bcda3857c2504676034e3ea57762d38393cc734cb377a726bd5cb153961b1b5"),
-    "Friday-WorkingHours-Morning.pcap_ISCX.csv":
-        (58316725, "53a41c24d570ea83b7ac55b2e94df94e7a8216aeb80a2af0246b6bc8bb543000"),
-    "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv":
-        (76906168, "ca1824c51bfbb7b3c72290a11be04366ba8815878c6a1cc5c44cb1cee269e99b"),
-    "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv":
-        (77123859, "6ff1580f5f81c0ae28a26f7631721018577f5f7c5e0feac28b795fcfe7b411ee"),
-}
-TOTAL_BYTES = sum(size for size, _ in EXPECTED.values())
-ZIP_BYTES_APPROX = 241_000_000
+USER_AGENT = "dataset-downloader/1.0"
 
 
 def log(msg):
@@ -64,25 +44,35 @@ def sha256_of(path, chunk=1 << 20):
     return h.hexdigest()
 
 
-def verify(dest):
+def verify(files, dest):
     """Eksik ya da beklenenden farklı dosyaların listesini döndürür (boşsa her şey yolunda)."""
     problems = []
-    for name, (size, digest) in EXPECTED.items():
+    for name, meta in files.items():
         path = dest / name
         if not path.exists():
             problems.append(f"eksik: {name}")
-        elif path.stat().st_size != size:
-            problems.append(f"boyut farklı: {name} ({path.stat().st_size} != {size})")
-        elif sha256_of(path) != digest:
+            continue
+        size = path.stat().st_size
+        if "bytes" in meta and size != meta["bytes"]:
+            problems.append(f"boyut farklı: {name} ({size} != {meta['bytes']})")
+        elif "sha256" in meta and sha256_of(path) != meta["sha256"]:
             problems.append(f"sha256 farklı: {name}")
     return problems
+
+
+def source_url(source):
+    kind = source.get("type")
+    if kind == "kaggle":
+        return "https://www.kaggle.com/api/v1/datasets/download/" + source["ref"]
+    if kind == "url":
+        return source["url"]
+    raise SystemExit(f"Desteklenmeyen kaynak türü: {kind!r} (kaggle ya da url olmalı)")
 
 
 def kaggle_auth_header():
     user, key = os.environ.get("KAGGLE_USERNAME"), os.environ.get("KAGGLE_KEY")
     if not (user and key):
-        cfg_dir = Path(os.environ.get("KAGGLE_CONFIG_DIR", Path.home() / ".kaggle"))
-        cfg = cfg_dir / "kaggle.json"
+        cfg = Path(os.environ.get("KAGGLE_CONFIG_DIR", Path.home() / ".kaggle")) / "kaggle.json"
         if cfg.exists():
             creds = json.loads(cfg.read_text())
             user, key = creds.get("username"), creds.get("key")
@@ -91,12 +81,12 @@ def kaggle_auth_header():
     return None
 
 
-def open_download(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "dataset-downloader/1.0"})
+def open_download(url, source):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         return urllib.request.urlopen(req, timeout=60)
     except urllib.error.HTTPError as e:
-        if e.code not in (401, 403):
+        if source.get("type") != "kaggle" or e.code not in (401, 403):
             raise
         auth = kaggle_auth_header()
         if auth is None:
@@ -105,15 +95,15 @@ def open_download(url):
                 "KAGGLE_USERNAME/KAGGLE_KEY ayarlayın ya da ~/.kaggle/kaggle.json oluşturun."
             )
         log("Anonim indirme reddedildi, Kaggle kimlik bilgileriyle deneniyor...")
-        req = urllib.request.Request(url, headers={"User-Agent": "dataset-downloader/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         # Yönlendirilen depolama adresine kimlik bilgisi gönderilmesin
         req.add_unredirected_header("Authorization", auth)
         return urllib.request.urlopen(req, timeout=60)
 
 
-def download(url, out):
+def download(url, source, out):
     part = out.with_name(out.name + ".part")
-    with open_download(url) as resp, open(part, "wb") as f:
+    with open_download(url, source) as resp, open(part, "wb") as f:
         total = int(resp.headers.get("Content-Length") or 0)
         done, last_pct = 0, -1
         while True:
@@ -127,68 +117,94 @@ def download(url, out):
                 if pct != last_pct and pct % 5 == 0:
                     log(f"  indiriliyor: %{pct:>3}  ({done / 1e6:,.0f} / {total / 1e6:,.0f} MB)")
                     last_pct = pct
+            elif done % (50 << 20) < (1 << 20):
+                log(f"  indiriliyor: {done / 1e6:,.0f} MB")
     if total and done != total:
         part.unlink()
         raise SystemExit(f"İndirme yarım kaldı: {done} / {total} bayt")
     part.replace(out)
 
 
-def extract(archive, dest):
-    """Arşivden sadece beklenen CSV'leri, düz isimleriyle dest/ altına çıkarır."""
+def extract(archive, files, dest):
+    """Zip'ten sadece config'teki dosyaları düz isimleriyle dest/ altına çıkarır.
+    İndirilen şey zip değilse ve config'te tek dosya varsa onu o isimle kaydeder."""
+    if not zipfile.is_zipfile(archive):
+        if len(files) != 1:
+            raise SystemExit("İndirilen dosya zip değil ama config'te birden fazla dosya var.")
+        archive.replace(dest / next(iter(files)))
+        return
     found = set()
     with zipfile.ZipFile(archive) as zf:
         for member in zf.infolist():
             name = Path(member.filename).name
-            if member.is_dir() or name not in EXPECTED:
+            if member.is_dir() or name not in files:
                 continue
             log(f"  çıkarılıyor: {name}")
             with zf.open(member) as src, open(dest / name, "wb") as dst:
                 shutil.copyfileobj(src, dst, 1 << 20)
             found.add(name)
-    missing = set(EXPECTED) - found
-    if missing:
-        raise SystemExit("Arşivde bulunamayan dosyalar: " + ", ".join(sorted(missing)))
+        missing = set(files) - found
+        if missing:
+            available = sorted(Path(m).name for m in zf.namelist() if not m.endswith("/"))
+            raise SystemExit(
+                "Arşivde bulunamayan dosyalar: " + ", ".join(sorted(missing))
+                + "\nArşivdeki dosyalar: " + ", ".join(available[:50])
+            )
 
 
 def main():
-    ap = argparse.ArgumentParser(description="CIC-IDS2017 CSV dosyalarını Kaggle'dan indirir.")
-    ap.add_argument("--dest", type=Path, default=DEFAULT_DEST, help=f"hedef klasör (varsayılan: {DEFAULT_DEST})")
+    ap = argparse.ArgumentParser(description="Dataset ham dosyalarını indirir ve doğrular.")
+    ap.add_argument("dataset", choices=registry.list_datasets())
+    ap.add_argument("--dest", type=Path, help="hedef klasör (varsayılan: data/raw/<dataset>)")
     ap.add_argument("--force", action="store_true", help="dosyalar mevcut olsa bile yeniden indir")
-    ap.add_argument("--keep-zip", action="store_true", help="indirilen zip dosyasını silme")
+    ap.add_argument("--keep-archive", action="store_true", help="indirilen arşivi silme")
     args = ap.parse_args()
 
-    dest = args.dest.resolve()
+    cfg = registry.load_dataset(args.dataset)
+    files, source = cfg["files"], cfg["source"]
+    dest = (args.dest or registry.raw_dir(args.dataset)).resolve()
     dest.mkdir(parents=True, exist_ok=True)
 
-    if not args.force and all((dest / n).exists() for n in EXPECTED):
+    if not args.force and all((dest / n).exists() for n in files):
         log(f"Dosyalar zaten mevcut, doğrulanıyor: {dest}")
-        problems = verify(dest)
+        problems = verify(files, dest)
         if not problems:
             log("Tüm dosyalar doğru. İndirmeye gerek yok (yeniden indirmek için --force).")
             return 0
         log("Sorunlu dosyalar bulundu, yeniden indirilecek:\n  " + "\n  ".join(problems))
 
-    need = ZIP_BYTES_APPROX + TOTAL_BYTES
+    expected_bytes = sum(m.get("bytes", 0) for m in files.values())
     free = shutil.disk_usage(dest).free
-    if free < need:
-        raise SystemExit(f"Yetersiz disk alanı: {free / 1e9:.1f} GB boş, ~{need / 1e9:.1f} GB gerekli.")
+    if expected_bytes and free < expected_bytes * 1.3:
+        raise SystemExit(f"Yetersiz disk alanı: {free / 1e9:.1f} GB boş, ~{expected_bytes * 1.3 / 1e9:.1f} GB gerekli.")
 
-    archive = dest / ".cicids2017.zip"
-    log(f"Kaynak: {KAGGLE_PAGE}")
-    log(f"İndiriliyor (~{ZIP_BYTES_APPROX / 1e6:.0f} MB) → {archive}")
-    download(DOWNLOAD_URL, archive)
+    url = source_url(source)
+    archive = dest / f".{args.dataset}.download"
+    log(f"Kaynak: {source.get('page') or url}")
+    log(f"İndiriliyor → {archive}")
+    download(url, source, archive)
 
-    log("Arşiv açılıyor...")
-    extract(archive, dest)
-    if not args.keep_zip:
+    log("Açılıyor...")
+    extract(archive, files, dest)
+    if archive.exists() and not args.keep_archive:
         archive.unlink()
 
-    log("Doğrulanıyor (boyut + sha256)...")
-    problems = verify(dest)
+    log("Doğrulanıyor...")
+    problems = verify(files, dest)
     if problems:
         log("HATA: indirilen dosyalar beklenenle eşleşmiyor:\n  " + "\n  ".join(problems))
         return 1
-    log(f"Tamam: {len(EXPECTED)} dosya, {TOTAL_BYTES / 1e6:,.0f} MB → {dest}")
+
+    unverified = [n for n, m in files.items() if "sha256" not in m]
+    if unverified:
+        log("\nBu dosyalar için config'te sha256 yok. Doğrulama için datasets/"
+            f"{args.dataset}.toml dosyasına ekleyebilirsiniz:")
+        for n in unverified:
+            p = dest / n
+            log(f'  [files."{n}"]  bytes = {p.stat().st_size}  sha256 = "{sha256_of(p)}"')
+
+    total = sum((dest / n).stat().st_size for n in files)
+    log(f"Tamam: {len(files)} dosya, {total / 1e6:,.0f} MB → {dest}")
     return 0
 
 
