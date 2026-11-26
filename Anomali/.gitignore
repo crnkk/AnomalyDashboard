@@ -1,0 +1,24 @@
+# Veri: tam dataset Kaggle'dan indirilir (scripts/download_data.py).
+# data/sample/ bilerek repoda tutulur.
+data/raw/
+data/processed/
+Anomali_dataset/
+*.zip
+*.part
+
+# Sanal ortamlar
+anomali/
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editör / ofis kilit dosyaları
+.~lock.*#
+.vscode/
+.idea/
+
+# Streamlit gizli ayarları
+.streamlit/secrets.toml
