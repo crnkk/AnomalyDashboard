@@ -1,7 +1,4 @@
 """Dataset kaydı: datasets/*.toml dosyalarını okur, veri klasörlerini çözer.
-
-Yeni dataset eklemek için datasets/<ad>.toml yazmak yeterlidir; kodda
-dataset'e özel bir şey tutulmaz.
 """
 import os
 from pathlib import Path
@@ -82,3 +79,49 @@ def resolve_data_dir(name):
     if any(raw_dir(name).glob("*.csv")):
         return raw_dir(name)
     return sample_dir(name)
+
+
+# ── Bir CSV klasörünün hangi datasete ait olduğunu bulma ─────────
+LABEL_COLUMN_GUESSES = ("label", "class", "attack_cat", "attack", "category")
+NORMAL_LABEL_GUESSES = ("BENIGN", "Benign", "benign", "Normal", "normal", "NORMAL", "0")
+
+
+def guess_label_column(columns):
+    """Config'i olmayan bir CSV'de etiket sütununu tahmin eder (yoksa son sütun)."""
+    stripped = [c.strip() for c in columns]
+    for guess in LABEL_COLUMN_GUESSES:
+        for c in stripped:
+            if c.lower() == guess:
+                return c
+    return stripped[-1]
+
+
+def detect_dataset(filenames, columns, read_label_column):
+    """Kayıtlı datasetlerden hangisine ait olduğunu döndürür, bulamazsa None.
+    """
+    stripped = {c.strip() for c in columns}
+    configs = [load_dataset(n) for n in list_datasets()]
+    for cfg in configs:
+        if any(f in cfg.get("files", {}) for f in filenames):
+            return cfg["name"]
+    best, best_score = None, 0.0
+    for cfg in configs:
+        col = cfg["label_column"]
+        if col not in stripped:
+            continue
+        labels = set(normalize_labels(read_label_column(col), cfg).unique())
+        score = len(labels & set(cfg.get("labels", {}))) / max(len(labels), 1)
+        if score > best_score:
+            best, best_score = cfg["name"], score
+    return best if best_score >= 0.5 else None
+
+
+def generic_config(label_column):
+    """Kayıtlı olmayan bir dataset için boş eşlemeli geçici config."""
+    return {
+        "name": "_bilinmeyen",
+        "title": "Bilinmeyen dataset",
+        "label_column": label_column,
+        "labels": {},
+        "files": {},
+    }

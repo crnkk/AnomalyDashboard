@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Bir datasetin tam verisinden küçük, tabakalı (stratified) bir örnek üretir.
 
-Her dosyada her etiketten oransal olarak --frac kadar satır alınır; nadir sınıflar
-kaybolmasın diye her etiketten en az --min-per-class satır (ya da hepsi) tutulur.
-Çıktı, orijinal dosya adları ve biçimiyle data/sample/<dataset>/ altına yazılır,
-böylece dashboard örnek veriyle de aynı şekilde çalışır.
-
-Kullanım:
-    python scripts/make_sample.py cicids2017
-    python scripts/make_sample.py cicids2017 --frac 0.01 --min-per-class 100
-"""
 import argparse
 import sys
 from pathlib import Path

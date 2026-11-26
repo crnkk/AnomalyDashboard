@@ -2,6 +2,7 @@
 # data/sample/ bilerek repoda tutulur.
 data/raw/
 data/processed/
+data/uploads/
 Anomali_dataset/
 *.zip
 *.part

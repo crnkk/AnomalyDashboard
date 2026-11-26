@@ -1,0 +1,5 @@
+[server]
+# Tarayıcıdan yüklenebilecek dosya başına üst sınır (MB). Varsayılan 200 MB.
+# Daha büyük veriler için dashboard'daki "Kaggle / URL" seçeneği önerilir:
+# dosyayı sunucu doğrudan indirir, tarayıcıdan geçmez.
+maxUploadSize = 1024

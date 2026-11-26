@@ -5,9 +5,11 @@ import os
 import glob
 import time
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ingest  # noqa: E402
 import registry  # noqa: E402
 
 # ── Sayfa ayarları ──────────────────────────────────────────────
@@ -36,21 +38,21 @@ st.markdown("""
     margin-bottom: 20px;
 }
 .warn-box {
-    background: #FFF8E1;
+    background: #a17b00;
     border-left: 4px solid #F9A825;
     padding: 12px 16px;
     border-radius: 0 8px 8px 0;
     margin: 8px 0;
 }
 .info-box {
-    background: #E3F2FD;
+    background: #3b6787;
     border-left: 4px solid #1565C0;
     padding: 12px 16px;
     border-radius: 0 8px 8px 0;
     margin: 8px 0;
 }
 .success-box {
-    background: #E8F5E9;
+    background: #36a83c;
     border-left: 4px solid #2E7D32;
     padding: 12px 16px;
     border-radius: 0 8px 8px 0;
@@ -74,26 +76,166 @@ DROP_COLS = {'Label', 'binary_label', 'multi_label', 'day'}
 # ══════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════
+MODE_UPLOAD = "⬆️ Dosya yükle (CSV / ZIP)"
+MODE_URL    = "🔗 Kaggle linki / URL"
+MAX_CSV     = 10    # aynı anda analize alınabilecek en fazla CSV
+RAM_FACTOR  = 15    # ölçüm: 885 MB CSV, üç aşama boyunca ~13,6 GB tepe bellek
+
+def total_ram_bytes():
+    try:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+    except (ValueError, OSError, AttributeError):
+        return None
+
+def progress_bar(text):
+    """st.progress'i ingest modülünün progress(done, total) arayüzüne bağlar."""
+    bar = st.progress(0.0, text=text)
+    def update(done, total):
+        if total:
+            bar.progress(min(done / total, 1.0), text=f"{text} {done / 1e6:,.0f} / {total / 1e6:,.0f} MB")
+        else:
+            bar.progress(0.0, text=f"{text} {done / 1e6:,.0f} MB")
+    return bar, update
+
+@st.cache_data(show_spinner="Dosyalar tanınıyor...")
+def detect_csvs(paths):
+    """CSV dosyalarının hangi kayıtlı datasete ait olduğunu bulur (None = tanınmadı)."""
+    first = Path(paths[0])
+    columns = pd.read_csv(first, nrows=0).columns.tolist()
+
+    def read_label_column(col):
+        return pd.read_csv(first, usecols=lambda c: c.strip() == col, low_memory=False).iloc[:, 0]
+
+    name = registry.detect_dataset([Path(p).name for p in paths], columns, read_label_column)
+    return name, registry.guess_label_column(columns)
+
+def reset_uploads():
+    """Silme sonrası: oturumdaki yükleme kayıtlarını ve yükleme kutusunu sıfırlar."""
+    for key in ['ingested', 'url_folder', 'data', 'load_log', 'missing', 'clean_data',
+                'clean_stats', 'labeled_data', 'benign_unmatched', 'source_key']:
+        st.session_state.pop(key, None)
+    st.session_state['uploader_gen'] = st.session_state.get('uploader_gen', 0) + 1
+    st.rerun()
+
+# Uygulama açılırken (oturum başına bir kez) eski ve fazla yüklemeleri temizle
+if 'uploads_cleaned' not in st.session_state:
+    ingest.cleanup_uploads()
+    st.session_state['uploads_cleaned'] = True
+
 with st.sidebar:
     st.title("🛡️ Anomali Tespit")
     st.caption("Veri hazırlama pipeline'ı")
     st.divider()
 
-    DATASET = st.selectbox(
-        "Dataset",
-        registry.list_datasets(),
-        help="datasets/ klasöründeki her .toml dosyası bir datasettir",
-    )
-    CFG = registry.load_dataset(DATASET)
+    MODE = st.radio("Veri kaynağı", [MODE_UPLOAD, MODE_URL])
+    csv_paths, MISSING, folders = [], [], []
 
-    DATA_DIR = st.text_input(
-        "Veri dizini",
-        value=str(registry.resolve_data_dir(DATASET)),
-        help="Kalıcı olarak değiştirmek için config.local.toml → [data_dirs]",
-    )
-    if Path(DATA_DIR).resolve() == registry.sample_dir(DATASET).resolve():
-        st.warning("Örnek veri kullanılıyor. Tam veri için: "
-                   f"`python scripts/download_data.py {DATASET}`")
+    if MODE == MODE_UPLOAD:
+        uploads = st.file_uploader(
+            f"CSV ya da ZIP dosyaları (en fazla {MAX_CSV})",
+            type=["csv", "zip"],
+            accept_multiple_files=True,
+            key=f"uploader_{st.session_state.get('uploader_gen', 0)}",
+            help="ZIP içindeki tüm CSV'ler açılır. Çok büyük veriler için "
+                 "'Kaggle linki / URL' seçeneği daha hızlıdır.",
+        )
+        uploads = uploads or []
+        if len(uploads) > MAX_CSV:
+            st.error(f"En fazla {MAX_CSV} dosya yüklenebilir; ilk {MAX_CSV} dosya kullanılıyor.")
+            uploads = uploads[:MAX_CSV]
+        ingested = st.session_state.setdefault('ingested', {})
+        for up in uploads:
+            if up.file_id not in ingested:
+                bar, update = progress_bar(f"{up.name} açılıyor:")
+                try:
+                    ingested[up.file_id] = str(ingest.ingest_file(up, up.name, progress=update))
+                except (ingest.IngestError, zipfile.BadZipFile) as e:
+                    st.error(f"{up.name}: {e}")
+                    continue
+                finally:
+                    bar.empty()
+            folders.append(Path(ingested[up.file_id]))
+    else:
+        url = st.text_input("Kaggle linki ya da dosya URL'si",
+                            placeholder="https://www.kaggle.com/datasets/sahip/dataset")
+        if st.button("⬇️ İndir", use_container_width=True, disabled=not url.strip()):
+            bar, update = progress_bar("İndiriliyor:")
+            try:
+                st.session_state['url_folder'] = (url.strip(), str(ingest.ingest_url(url, progress=update)))
+            except ingest.IngestError as e:
+                st.error(str(e))
+            finally:
+                bar.empty()
+        saved = st.session_state.get('url_folder')
+        if saved and saved[0] == url.strip():
+            folders.append(Path(saved[1]))
+
+    for folder in folders:
+        ingest.touch(folder)
+
+    seen = set()
+    for folder in folders:
+        for p in sorted(folder.glob("*.csv")):
+            if p.name not in seen:
+                seen.add(p.name)
+                csv_paths.append(p)
+
+    if csv_paths:
+        name, guessed_label = detect_csvs(tuple(str(p) for p in csv_paths))
+        if name:
+            DATASET, CFG = name, registry.load_dataset(name)
+            st.success(f"Tanınan dataset: **{CFG['title']}**")
+        else:
+            DATASET, CFG = '_bilinmeyen', registry.generic_config(guessed_label)
+            st.info(f"Dataset tanınmadı. Etiket sütunu: **{guessed_label}**. "
+                    "Kalıcı eşleme için `datasets/` altına bir .toml ekleyin.")
+    else:
+        DATASET, CFG = '_bos', registry.generic_config('Label')
+
+    def file_meta(fname):
+        stem = Path(fname).stem.replace('.pcap_ISCX', '')
+        return CFG['files'].get(fname, {'segment': stem, 'title': stem})
+
+    if csv_paths:
+        names = [p.name for p in csv_paths]
+        if len(names) > MAX_CSV:
+            st.warning(f"{len(names)} CSV bulundu; aynı anda en fazla {MAX_CSV} tanesi seçilebilir.")
+        selected = st.multiselect(
+            "CSV dosyaları",
+            names,
+            default=names[:MAX_CSV],
+            max_selections=MAX_CSV,
+            format_func=lambda f: file_meta(f).get('title', f),
+            help="Analize dahil edilecek dosyalar",
+        )
+        SOURCES = [p for p in csv_paths if p.name in selected]
+
+        size = sum(p.stat().st_size for p in SOURCES)
+        need = size * RAM_FACTOR
+        st.caption(f"Seçilen: {size / 1e6:,.0f} MB · işlerken gereken bellek ~{need / 1e9:,.1f} GB")
+        ram = total_ram_bytes()
+        if ram and need > ram * 0.6:
+            st.warning(f"Bu seçim bilgisayarın belleğini ({ram / 1e9:,.0f} GB) zorlayabilir. "
+                       "Daha az dosya seçin.")
+    else:
+        SOURCES = []
+
+    uploads_on_disk = ingest.list_uploads()
+    if uploads_on_disk:
+        disk_total = sum(size for _, size, _, _ in uploads_on_disk)
+        with st.expander(f"🗑️ Yüklenen veriler ({disk_total / 1e9:,.2f} GB)"):
+            st.caption(f"Diskte {len(uploads_on_disk)} kaynak var. "
+                       f"{ingest.UPLOAD_MAX_AGE_DAYS} gün kullanılmayanlar ve toplam "
+                       f"{ingest.UPLOAD_MAX_BYTES / 1e9:.0f} GB'ı aşan kısım (en eski kullanılandan "
+                       "başlayarak) uygulama açılırken otomatik silinir.")
+            del_current, del_all = st.columns(2)
+            if del_current.button("Bu kaynağı sil", disabled=not folders, use_container_width=True):
+                for folder in folders:
+                    ingest.delete_upload(folder)
+                reset_uploads()
+            if del_all.button("Tümünü sil", use_container_width=True):
+                ingest.delete_all_uploads()
+                reset_uploads()
 
     st.divider()
     st.markdown("### Pipeline aşamaları")
@@ -105,18 +247,19 @@ with st.sidebar:
     5. 📊 **Feature Grupları**
     """)
     st.divider()
-    st.caption("Tüm aşamalar önbelleğe alınır. Dizin değişirse yeniden hesaplanır.")
+    st.caption("Tüm aşamalar önbelleğe alınır. Seçim değişirse yeniden hesaplanır.")
 
-# ── Seçilen datasetin config'inden türetilen tablolar ──────────
-FILE_MAP      = {fname: meta['segment'] for fname, meta in CFG['files'].items()}
-DAY_LABELS    = {meta['segment']: meta.get('title', meta['segment']) for meta in CFG['files'].values()}
+# ── Seçimden türetilen tablolar ─────────────────────────
+FILE_MAP      = {p.name: file_meta(p.name)['segment'] for p in SOURCES}
+DAY_LABELS    = {file_meta(p.name)['segment']: file_meta(p.name).get('title', p.name) for p in SOURCES}
 ATTACK_GROUPS = registry.label_group_ids(CFG)   # ham etiket → grup id (normal = -1)
 GROUP_NAMES   = registry.group_titles()         # grup id → başlık
 LABEL_COL     = CFG['label_column']
-NORMAL_LABELS = [lbl for lbl, gid in ATTACK_GROUPS.items() if gid == -1]
+NORMAL_LABELS = ([lbl for lbl, gid in ATTACK_GROUPS.items() if gid == -1]
+                 or list(registry.NORMAL_LABEL_GUESSES))
 
-# Dataset ya da dizin değişince önceki aşamaların sonuçlarını unut
-SOURCE_KEY = f"{DATASET}:{Path(DATA_DIR).resolve()}"
+# Seçim değişince önceki aşamaların sonuçlarını unut
+SOURCE_KEY = f"{DATASET}:" + "|".join(f"{p.resolve()}@{p.stat().st_mtime_ns}" for p in SOURCES)
 if st.session_state.get('source_key') != SOURCE_KEY:
     for key in ['data', 'load_log', 'missing', 'clean_data', 'clean_stats',
                 'labeled_data', 'benign_unmatched']:
@@ -140,21 +283,21 @@ def color_ratio(ratio):
         return "🟢"
 
 @st.cache_data(show_spinner=False)
-def load_data(dataset, data_dir):
+def load_data(source_key, _sources):
+    """_sources: CSV yolları. Önbellek anahtarı source_key (dataset + yollar + değişme zamanı)."""
     frames = []
     load_log = []
-    missing = []
 
-    for fname, day_tag in FILE_MAP.items():
-        path = os.path.join(data_dir, fname)
-        if not os.path.exists(path):
-            missing.append(fname)
-            continue
+    for path in _sources:
+        fname = path.name
         df = pd.read_csv(path, encoding='utf-8', low_memory=False)
         df.columns = df.columns.str.strip()
+        if LABEL_COL not in df.columns:
+            raise ValueError(f"{fname}: '{LABEL_COL}' etiket sütunu bulunamadı")
         if LABEL_COL != 'Label':
-            df = df.rename(columns={LABEL_COL: 'Label'})
+            df = df.drop(columns=['Label'], errors='ignore').rename(columns={LABEL_COL: 'Label'})
         df['Label'] = registry.normalize_labels(df['Label'], CFG)
+        day_tag = FILE_MAP[fname]
         df['day'] = day_tag
         classes = df['Label'].unique().tolist()
         load_log.append({
@@ -167,10 +310,10 @@ def load_data(dataset, data_dir):
         frames.append(df)
 
     if not frames:
-        return None, load_log, missing
+        return None, load_log
 
     data = pd.concat(frames, ignore_index=True)
-    return data, load_log, missing
+    return data, load_log
 
 @st.cache_data(show_spinner=False)
 def clean_data(data_hash, _data):
@@ -226,21 +369,23 @@ with tab1:
 
     col_btn, col_info = st.columns([1, 3])
     with col_btn:
-        load_btn = st.button("🚀 Veriyi Yükle", type="primary", use_container_width=True)
+        load_btn = st.button("🚀 Veriyi Yükle", type="primary", use_container_width=True,
+                             disabled=not SOURCES)
 
     if load_btn or 'data' in st.session_state:
 
         if 'data' not in st.session_state or load_btn:
             with st.spinner("CSV dosyaları okunuyor..."):
                 progress = st.progress(0, text="Dosyalar taranıyor...")
-                data, load_log, missing = load_data(DATASET, DATA_DIR)
+                data, load_log = load_data(SOURCE_KEY, SOURCES)
+                missing = MISSING
                 for i in range(100):
                     time.sleep(0.005)
                     progress.progress(i + 1, text=f"Yükleniyor... %{i+1}")
                 progress.empty()
 
             if data is None:
-                st.error(f"❌ Hiçbir CSV bulunamadı: `{DATA_DIR}`")
+                st.error("❌ Yüklenecek CSV seçilmedi. Soldaki panelden dosya seçin.")
                 st.stop()
 
             st.session_state['data']     = data
@@ -293,9 +438,9 @@ with tab1:
         st.markdown('<div class="success-box">✅ Veri başarıyla yüklendi. "Temizleme" sekmesine geçebilirsiniz.</div>',
                     unsafe_allow_html=True)
     else:
-        st.markdown('<div class="info-box">ℹ️ Veriyi yüklemek için yukarıdaki butona tıklayın. Dizin yolunu soldaki panelden değiştirebilirsiniz.</div>',
+        st.markdown('<div class="info-box">ℹ️ Soldaki panelden veri kaynağını ve CSV dosyalarını seçin, '
+                    'sonra yukarıdaki butona tıklayın.</div>',
                     unsafe_allow_html=True)
-        st.code(f'DATA_DIR = "{DATA_DIR}"', language='python')
 
 # ══════════════════════════════════════════════════════
 # TAB 2: TEMİZLEME
@@ -454,13 +599,18 @@ with tab4:
     st.markdown("#### Binary class weight (Stage 1)")
 
     y_bin = labeled['binary_label'].values
-    w = compute_class_weight('balanced', classes=np.array([0, 1]), y=y_bin)
-    cw_bin = {0: float(w[0]), 1: float(w[1])}
+    if len(np.unique(y_bin)) < 2:
+        only = "normal" if y_bin.max() == 0 else "saldırı"
+        st.info(f"Seçilen veride sadece **{only}** trafik var; binary class weight hesaplanamaz. "
+                "Hem normal hem saldırı içeren dosyaları seçin.")
+    else:
+        w = compute_class_weight('balanced', classes=np.array([0, 1]), y=y_bin)
+        cw_bin = {0: float(w[0]), 1: float(w[1])}
 
-    cw1, cw2, cw3 = st.columns(3)
-    cw1.metric("Normal ağırlığı (0)", f"{cw_bin[0]:.4f}")
-    cw2.metric("Anomali ağırlığı (1)", f"{cw_bin[1]:.4f}")
-    cw3.metric("Ağırlık oranı (1/0)", f"{cw_bin[1]/cw_bin[0]:.1f}x")
+        cw1, cw2, cw3 = st.columns(3)
+        cw1.metric("Normal ağırlığı (0)", f"{cw_bin[0]:.4f}")
+        cw2.metric("Anomali ağırlığı (1)", f"{cw_bin[1]:.4f}")
+        cw3.metric("Ağırlık oranı (1/0)", f"{cw_bin[1]/cw_bin[0]:.1f}x")
 
     st.markdown('<div class="info-box">ℹ️ class_weight=\'balanced\' formülü: <b>N_total / (N_classes × N_class_i)</b>.<br>'
                 'Anomali ağırlığı yüksekse model anomaliyi daha fazla önemser — kayıp fonksiyonunda penalize edilir.</div>',
@@ -497,8 +647,13 @@ with tab4:
     y_mul_only = labeled[labeled['binary_label'] == 1]['multi_label'].values
     y_mul_only = y_mul_only[y_mul_only >= 0].astype(int)   # -1 (normal) çıkar
     existing_classes = np.unique(y_mul_only)               # gerçekte var olan sınıflar
-    w_mul = compute_class_weight('balanced', classes=existing_classes, y=y_mul_only)
-    cw_mul = {int(cls): float(w) for cls, w in zip(existing_classes, w_mul)}
+    if len(existing_classes) == 0:
+        st.info("Gruplara eşlenmiş saldırı etiketi yok (veride saldırı yok ya da dataset "
+                "tanınmadı), Stage 2 ağırlıkları hesaplanamaz.")
+        cw_mul = {}
+    else:
+        w_mul = compute_class_weight('balanced', classes=existing_classes, y=y_mul_only)
+        cw_mul = {int(cls): float(w) for cls, w in zip(existing_classes, w_mul)}
 
     cw_df = pd.DataFrame([
         {
